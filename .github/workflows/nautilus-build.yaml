@@ -1,0 +1,59 @@
+# Nautilus-Build für sales-cockpit.
+# Abweichend vom sona-monitor-Muster (Shared-Workflow
+# sipgate/workflows/nautilus-build.yaml) ruft dieser Job die
+# Composite-Action sipgate/build-push-action direkt auf: nur sie
+# unterstützt build_secrets, und der Build braucht das BuildKit-Secret
+# `npm_token` für das GitHub-Package @sipgate/revop-ui (npm.pkg.github.com).
+# Im CI ist das Token das github.token des Runs (packages: read; Repo muss
+# in den Package-Settings von sipgate/sipgate-revop-ui für Actions-Zugriff
+# freigeschaltet sein). Steps sind identisch zum Shared-Workflow.
+# Achtung: Der Image-Pfad muss mit .spec.image in
+# .sipgate/nautilus.yaml übereinstimmen.
+
+name: "nautilus: Build service"
+
+concurrency:
+  group: nautilus-build-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  # contents: write — repository_dispatch (deploy-trigger) braucht es;
+  # packages: read — npm-install von @sipgate/revop-ui aus npm.pkg.github.com
+  contents: write
+  packages: read
+
+jobs:
+  build:
+    runs-on:
+      group: nautilus-build
+    steps:
+      - name: Set images
+        id: set_images
+        run: |
+          IMAGES="sipgate/service/nautilus/sales-cockpit:latest"
+          echo "images=$IMAGES" >> $GITHUB_OUTPUT
+
+      - name: Build and push docker image
+        id: docker_build_push
+        uses: sipgate/build-push-action@v2.6
+        with:
+          build_secrets: npm_token=${{ github.token }}
+          dockerfile: ${{ github.workspace }}/Dockerfile
+          push_image: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.set_images.outputs.images }}
+
+      - name: Trigger deploy action
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          event-type: docker-image-digest-changed
+          client-payload: '{"image_hash": "${{ steps.docker_build_push.outputs.digest }}"}'

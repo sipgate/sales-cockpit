@@ -1,12 +1,10 @@
 'use client';
 
 import { Suspense, useEffect, useState, useCallback } from 'react';
-import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { SalesCanvas } from '@/components/canvas/SalesCanvas';
 import { ExportButton } from '@/components/canvas/ExportButton';
-import { UserMenu } from '@/components/UserMenu';
 import { Autosuggest } from '@sipgate/revop-ui';
 import { useCanvasStore } from '@/stores/canvas-store';
 import { Loader2, ArrowLeft } from 'lucide-react';
@@ -46,7 +44,6 @@ export default function Home() {
 function HomeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { status } = useSession();
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -81,8 +78,6 @@ function HomeContent() {
     setIsInitialized(true);
   }, [searchParams, isInitialized, router]);
 
-  const isAuthenticated = status === 'authenticated';
-
   // Fetch pipelines - only when authenticated
   const { error: pipelinesError } = useQuery({
     queryKey: ['pipelines'],
@@ -92,7 +87,6 @@ function HomeContent() {
       const data = await response.json();
       return data.data as Pipeline[];
     },
-    enabled: isAuthenticated,
   });
 
   // Fetch deals for selected pipeline
@@ -107,7 +101,7 @@ function HomeContent() {
       const data = await response.json();
       return data.data as Deal[];
     },
-    enabled: isAuthenticated && !!selectedPipelineId,
+    enabled: !!selectedPipelineId,
   });
 
   // Fetch selected deal canvas data
@@ -119,7 +113,7 @@ function HomeContent() {
       const data = await response.json();
       return data.data as CanvasData;
     },
-    enabled: isAuthenticated && !!selectedDealId,
+    enabled: !!selectedDealId,
   });
 
   // Update canvas store when deal data changes
@@ -152,33 +146,12 @@ function HomeContent() {
     }
   }, [dealData, selectedDealId, setCanvasData]);
 
-  // Redirect to login if not authenticated
-  useEffect(() => {
-    if (status === 'unauthenticated') {
-      router.push('/login');
-    }
-  }, [status, router]);
-
   // Handle deal selection
   const handleDealChange = (dealId: string | null) => {
     clearCanvasData(); // Clear old data immediately to show empty state
     setSelectedDealId(dealId);
     updateUrl(selectedPipelineId, dealId);
   };
-
-  // Show loading while checking auth
-  if (status === 'loading') {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-      </div>
-    );
-  }
-
-  // Don't render if not authenticated
-  if (status === 'unauthenticated') {
-    return null;
-  }
 
   // Save handler
   const handleSave = async () => {
@@ -244,8 +217,7 @@ function HomeContent() {
           </div>
           <div className="flex items-center gap-2">
             <ExportButton disabled={!selectedDealId} />
-            <UserMenu />
-          </div>
+            </div>
         </div>
       </header>
 

@@ -1,34 +1,31 @@
+// Pipelines: dünner Store-Reader. Die HubSpot-Abfrage läuft im
+// Hintergrund-Poller (src/lib/runtime/poller.ts → pollPipelines).
+
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
-import { getHubSpotClient } from '@/lib/hubspot/client';
+import { getSnapshotWithStand, pipelinesKey } from '@/lib/runtime/store';
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url);
-    const tvSecret = searchParams.get('tvSecret');
-    const isValidTvSecret = tvSecret && process.env.TV_SECRET && tvSecret === process.env.TV_SECRET;
+    // Volle HubSpot-Pipeline-Objekte (id, label, stages, …) — unverändert
+    // durchgereicht, tv/canvas lesen u.a. die Stages daraus.
+    const entry = getSnapshotWithStand<unknown[]>(pipelinesKey);
 
-    if (!isValidTvSecret) {
-      const session = await getSession();
-      if (!session) {
-        return NextResponse.json(
-          { error: 'Unauthorized' },
-          { status: 401 }
-        );
-      }
+    if (!entry) {
+      return NextResponse.json(
+        { success: false, warming: true, error: 'Store is warming up, retry shortly.' },
+        { status: 503, headers: { 'Retry-After': '10' } }
+      );
     }
-
-    const client = getHubSpotClient();
-    const pipelines = await client.getPipelines();
 
     return NextResponse.json({
       success: true,
-      data: pipelines.results,
+      data: entry.snapshot,
+      stand: entry.stand,
     });
   } catch (error) {
-    console.error('Error fetching pipelines:', error);
+    console.error('Error reading pipelines from store:', error);
     return NextResponse.json(
-      { error: 'Failed to fetch pipelines' },
+      { error: 'Failed to read pipelines' },
       { status: 500 }
     );
   }

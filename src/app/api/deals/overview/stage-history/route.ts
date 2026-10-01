@@ -1,39 +1,18 @@
+// Stage-History: dünner Store-Reader. Die Maps baut der Hintergrund-Poller
+// je Portfolio-Variante (src/lib/overview/deal-enrichment.ts); dieser
+// Handler merged über alle Varianten und liefert den angefragten Deal-Subset.
+
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
-import { getHubSpotClient } from '@/lib/hubspot/client';
-import { getOrFetch, hashIdList } from '@/lib/server-cache';
+import { getDomainSnapshots } from '@/lib/runtime/store';
+import type { DealEnrichment, DealStageHistoryMap } from '@/lib/overview/deal-enrichment';
 
-const CACHE_TTL_SECONDS = 5 * 60;
-
-export interface DealStageHistoryEntry {
-  stageId: string;
-  timestamp: string;
-}
-
-export interface DealStageHistoryMap {
-  [dealId: string]: {
-    stageEnteredAt: string;
-    daysInStage: number;
-    history: DealStageHistoryEntry[];
-  } | null;
-}
+// Typ-Re-Exports: Komponenten importieren die Typen historisch über diese
+// Route; die Definitionen leben jetzt im Builder-Modul.
+export type { DealStageHistoryEntry, DealStageHistoryMap } from '@/lib/overview/deal-enrichment';
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const tvSecret = searchParams.get('tvSecret');
-    const isValidTvSecret = tvSecret && process.env.TV_SECRET && tvSecret === process.env.TV_SECRET;
-
-    if (!isValidTvSecret) {
-      const session = await getSession();
-      if (!session) {
-        return NextResponse.json(
-          { error: 'Unauthorized' },
-          { status: 401 }
-        );
-      }
-    }
-
     const dealIds = searchParams.get('dealIds');
 
     if (!dealIds) {
@@ -51,60 +30,36 @@ export async function GET(request: Request) {
       });
     }
 
-    const forceRefresh = searchParams.get('refresh') === '1';
-    const cacheKey = `deal-stage-history:${hashIdList(dealIdList)}`;
-    const { data: stageHistoryMap, meta } = await getOrFetch<DealStageHistoryMap>(
-      cacheKey,
-      CACHE_TTL_SECONDS,
-      () => buildStageHistoryMap(dealIdList),
-      { forceRefresh },
-    );
+    // Über alle produkt-Varianten mergen: derselbe Deal kann in mehreren
+    // Snapshots auftauchen, die Stage-History ist je Deal identisch.
+    const merged: DealStageHistoryMap = {};
+    let anySnapshot = false;
+    for (const enrichment of getDomainSnapshots<DealEnrichment>('dealEnrichment').values()) {
+      anySnapshot = true;
+      for (const dealId of dealIdList) {
+        if (dealId in enrichment.stageHistory && !(dealId in merged)) {
+          merged[dealId] = enrichment.stageHistory[dealId];
+        }
+      }
+    }
+
+    if (!anySnapshot) {
+      return NextResponse.json(
+        { success: false, warming: true, error: 'Store is warming up, retry shortly.' },
+        { status: 503, headers: { 'Retry-After': '10' } }
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      data: stageHistoryMap,
-      cache: meta,
+      data: merged,
     });
   } catch (error) {
-    console.error('Error fetching stage history:', error);
+    console.error('Error reading stage history from store:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Failed to fetch stage history', details: errorMessage },
+      { error: 'Failed to read stage history', details: errorMessage },
       { status: 500 }
     );
   }
-}
-
-async function buildStageHistoryMap(dealIdList: string[]): Promise<DealStageHistoryMap> {
-  const client = getHubSpotClient();
-  const now = new Date();
-
-  // Single batch read with `propertiesWithHistory` instead of one GET per
-  // deal — same reasoning as the meetings endpoint. See AGENTS.md "Never
-  // fan out per deal — always batch".
-  const historiesByDeal = await client.getDealStageHistories(dealIdList);
-
-  const stageHistoryMap: DealStageHistoryMap = {};
-  for (const dealId of dealIdList) {
-    const history = historiesByDeal.get(dealId);
-    if (history && history.length > 0) {
-      const latestEntry = history[0];
-      const stageEnteredAt = latestEntry.timestamp;
-      const entered = new Date(stageEnteredAt);
-      const diffTime = now.getTime() - entered.getTime();
-      const daysInStage = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-
-      stageHistoryMap[dealId] = {
-        stageEnteredAt,
-        daysInStage,
-        history: history.map(entry => ({
-          stageId: entry.value,
-          timestamp: entry.timestamp,
-        })),
-      };
-    } else {
-      stageHistoryMap[dealId] = null;
-    }
-  }
-  return stageHistoryMap;
 }

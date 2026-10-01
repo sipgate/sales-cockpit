@@ -85,8 +85,9 @@ to `main` and verify there. Never assume the running app reflects worktree edits
 
 ### 2. Done = committed + pushed + deploy-verified
 
-A change is not "done" until it is committed, pushed to `main`, and the resulting
-Netlify deploy is confirmed green. **Never end a session with uncommitted or
+A change is not "done" until it is committed, pushed to `main`, and the
+resulting nautilus build workflow (GitHub Actions, `.github/workflows/nautilus-build.yaml`)
+is confirmed green — it builds the Docker image the cluster deploys. **Never end a session with uncommitted or
 unpushed changes that belong to the task.** Committing and pushing are separate
 steps: commit as you go, but **push is always an explicit step** — never auto-push
 on commit, never bundle "commit + push" into one action (global rule: never
@@ -306,90 +307,91 @@ from a lead. Endpoints that need to join a deal to its originating lead
 must fetch `leads → deals` for the lead set and invert the map locally;
 see `getLeadsWithAssociations` and `LeadOverviewItem.associatedDealIds`.
 
-## Server-side response cache (Netlify Blobs)
+## Runtime-Store & Hintergrund-Poller (Nautilus-Architektur)
 
-To keep HubSpot quota usage flat regardless of how many users hit the
-app, the five HubSpot-backed overview endpoints write their aggregated
-response into a shared, server-side TTL cache before returning it to the
-client. The browser still keeps its own `localStorage` cache (see
-`src/lib/pipeline-cache.ts`) on top — the server cache exists for
-*cross-user* and *cross-tab* hits, not for replacing the browser cache.
+Das Cockpit läuft als **Nautilus-Service** im sipgate-Tooling-Cluster
+(`nautilus-tooling01`, Muster: growth-cockpit / sona-monitor). Kein Netlify
+mehr. Datenfluss:
 
-### Cached endpoints
+- **Ein Hintergrund-Poller** (`src/lib/runtime/poller.ts`, gestartet über
+  `src/instrumentation.ts` beim Server-Start) holt alle Messdaten von den
+  Quellen (HubSpot, JIRA, Amplitude BigQuery) **auf Timern** in einen
+  **Runtime-Store** (`src/lib/runtime/store.ts`: In-Memory, persistiert als
+  JSON unter `SALES_COCKPIT_STORE_DIR`, Default `os.tmpdir()/sales-cockpit-store`,
+  damit ein Reboot nicht mit leerem Store startet).
+- **Alle Read-Endpoints** (`/api/deals/overview`, `/meetings`, `/stage-history`,
+  `/api/leads/overview`, `/api/projects/overview`, `/api/marketing/funnel`,
+  `/api/amplitude/playbook-stats`, `/api/pipelines`) sind dünne Store-Reader:
+  sie leiten nur noch weiter, was der Poller gelegt hat. Kein Quellen-Fetch
+  auf dem Request-Pfad. Antwortet der Store kalt: `503 { warming: true }`
+  (Boot-Poll läuft, Client retryt über React-Query).
+- **Query-Rate gegen die Quellen kommt ausschließlich aus den Poll-Timern**,
+  nie aus Requests. Frische Daten = nächster Poll-Tick, nicht der
+  Refresh-Button (der invalidiert nur die React-Query-Caches).
+- **Live-Ausnahmen** (schreiben oder interaktiv, kein Poll-Takt):
+  `/api/deals/[dealId]` (Canvas GET/PATCH) und `/api/jira/*` lesen direkt
+  von HubSpot bzw. JIRA.
+- **Auth: keine.** Der Service steht im Tooling-Cluster hinter VPN.
+  next-auth, Login-Route, Middleware und TV_SECRET-Bypass sind entfernt;
+  der MCP-Endpoint behält seinen Bearer (MCP_SECRET).
 
-| Route | Cache key | TTL |
+### Poll-Takte und Domänen
+
+| Domäne (Store) | Varianten | Takt (Env) |
 |---|---|---|
-| `GET /api/deals/overview` | `deals-overview:<pipelineId>:<produkt>` | 5 min |
-| `GET /api/leads/overview` | `leads-overview:<produkt>` | 5 min |
-| `GET /api/projects/overview` | `projects-overview:<produkt>` | 5 min |
-| `GET /api/deals/overview/meetings` | `deal-meetings:<sha1(dealIds)>` | 5 min |
-| `GET /api/deals/overview/stage-history` | `deal-stage-history:<sha1(dealIds)>` | 5 min |
-| `GET /api/amplitude/playbook-stats` | `playbook-stats:<days>d` | 30 min |
+| `pipelines` | – | 15 min (`POLL_HUBSPOT_MS`) |
+| `dealsOverview` | `SALES_PIPELINE_ID` × 6 Portfolio-Werte | 15 min (`POLL_HUBSPOT_MS`) |
+| `dealEnrichment` (Meetings + Stage-History) | je dealsOverview-Variante | 15 min (im selben Poll) |
+| `leadsOverview` | je Portfolio-Wert | 15 min (`POLL_HUBSPOT_MS`) |
+| `projectsOverview` | `frontdesk` (HubSpot + JIRA) | 60 min (`POLL_PROJECTS_MS`) |
+| `marketingFunnel` | `frontdesk` × Day-Windows 30/60/90/180/all | 6 h (`POLL_BQ_MS`) |
+| `playbookStats` | Day-Windows 30/60/90/180/all | 6 h (`POLL_BQ_MS`) |
 
-Each response now includes a `cache: { hit, cachedAt, ageMs, ttlSeconds }`
-field next to `data` so the client can tell stale-from-cache apart from
-fresh-from-HubSpot.
+Day-Windows: die drei UI-Presets (30/90/all) plus die aktiven
+Vergleichsfenster (×2), damit der KPI-Tree ohne Cold Path rechnet. `all`
+wächst täglich und wird je Lauf neu berechnet (bekannter Wrinkle: der
+Store sammelt pro Tag einen neuen `:all`-Key).
 
-### Storage backend
+### Sanity-Checks und Status
 
-`src/lib/server-cache.ts` picks the backend at runtime by **probing the
-capability**, not by reading an env var:
+Jeder Poll-Lauf prüft den Snapshot auf Plausibilität (nicht-leere Stages,
+Zahlen ≥ 0, …), bevor er ihn übernimmt; bei Verletzung bleibt der letzte
+gültige Stand stehen und der Fehler landet im Status. `GET /health`
+liefert je Variante `stand` (letzter erfolgreicher Poll), `lastAttemptAt`
+und `error` — Liveness/Readiness-Probe des Clusters, Datenqualität liest
+man aus dem `error`-Feld, nicht aus dem Statuscode.
 
-- **Production (deployed Netlify Functions):** `@netlify/blobs` store named
-  `hubspot-cache`. Provisioned automatically by the `@netlify/plugin-nextjs`
-  runtime — no setup, no env vars.
-- **Local dev (`next dev`):** file-system fallback in `.cache/blobs/`
-  (gitignored). We do not require `netlify dev` because `scripts/dev-prep.sh`
-  runs `next dev` directly.
+### BigQuery: REST statt SDK (Proxy!)
 
-Detection: `getBlobStore()` calls `getStore('hubspot-cache')` once (cached).
-It succeeds only when a Netlify Blobs context is injected (deployed runtime)
-and throws under local `next dev` → fs fallback. Each response's
-`cache.backend` field (`'blobs' | 'fs'`) reports which one ran, for
-diagnosis.
+`src/lib/amplitude/client.ts` nutzt die **BigQuery-REST-Jobs-API mit
+Service-Account-JWT** (`GOOGLE_APPLICATION_CREDENTIALS_JSON` inline oder
+`GOOGLE_APPLICATION_CREDENTIALS` als Pfad), NICHT das
+`@google-cloud/bigquery`-SDK: Das SDK spricht gRPC, gRPC ignoriert die
+`http_proxy`-Env-Variablen, die Nautilus den Pods injiziert — jede Query
+würde still am Egress-Proxy scheitern. fetch (undici) geht sauber durch
+den Proxy (globaler `EnvHttpProxyAgent` aus `src/lib/sources/proxy.ts`).
 
-> ⚠️ **Do NOT gate this on `process.env.NETLIFY === 'true'`.** That variable
-> is set during the Netlify *build* but is **absent at function *runtime***.
-> Gating on it silently forced every production request onto the ephemeral fs
-> fallback (writes vanish between invocations), so the cache never persisted,
-> the slow overview endpoints rebuilt on every call, and both hit the ~26s
-> function timeout → **502**. This exact bug shipped once (fixed in the commit
-> that added `getBlobStore()`); don't reintroduce it. Same reasoning for the
-> warm-vs-sync gate in `serveWarmBacked` — that one keys off
-> `NODE_ENV === 'production'` (reliable at runtime), never `NETLIFY`.
+Kosten-Leitplanken (unverändert): Dry-Run je Query mit
+`maximumBytesBilled` (Default 300 GiB, `BIGQUERY_MAX_BYTES_BILLED`), und
+die Frequenz nur aus den Poll-Timern. Siehe "Cost guardrails" in
+`src/lib/amplitude/client.ts`.
 
-Read/write errors are logged and swallowed — a broken cache must never
-break the request path. A cache miss simply re-fetches from HubSpot.
+### Deploy
 
-### Bypass for user-initiated refresh
-
-Every cached endpoint accepts `?refresh=1`, which skips the read step
-and forces a fresh fetch (the result is still written back to the
-cache). The frontend wires this through the dashboard's refresh button:
-
-- `src/app/page.tsx` keeps a `pendingServerRefresh` ref keyed by
-  endpoint (`overview` / `leads` / `projects` / `meetings` /
-  `stageHistory`).
-- `handleRefresh()` sets all five to `true`, then invalidates the
-  matching React Query queries.
-- Each `queryFn` reads its flag via `takeRefreshFlag(key)` and resets
-  it after consuming it. Background refetches (window focus, network
-  reconnect, etc.) therefore never set `?refresh=1` and continue to hit
-  the server cache as intended.
-
-If you add a new HubSpot-backed endpoint, wrap it with `getOrFetch()`
-and — if the dashboard's refresh button should bust it — extend the
-`pendingServerRefresh` map and pass the flag into the `queryFn`'s
-fetch URL.
-
-### When to remove this layer
-
-This is a stopgap until the planned BigQuery replication is online.
-Once HubSpot data flows into BigQuery and the API routes read from
-there, both this cache and `src/lib/pipeline-cache.ts` can go. Swap the
-`fetcher` argument to `getOrFetch()` for a BigQuery query (or remove
-the wrapper entirely if BQ is already fast enough) and delete the
-browser-side counterpart.
+- `Dockerfile` — Standalone-Build (`NEXT_PRIVATE_STANDALONE=true`), Port
+  8080, non-root, BuildKit-Secret `npm_token` für `@sipgate/revop-ui` aus
+  `npm.pkg.github.com` (Repo braucht Actions-Zugriff auf das Package).
+- `.sipgate/nautilus.yaml` — CRD: Egress zu `api.hubspot.com`,
+  `sipgatede.atlassian.net`, `bigquery.googleapis.com`,
+  `oauth2.googleapis.com`; `replicasPerLocation: 1` (Poller-Store, doppelte
+  Replikas würden doppelt pollen). **Secrets müssen vor dem ersten Deploy
+  mit `nautilusctl` versiegelt werden** (Platzhalter `TODO_SEAL` im YAML);
+  zu versiegeln: `HUBSPOT_PRIVATE_APP_TOKEN`, `JIRA_API_TOKEN`,
+  `JIRA_BASE_URL`, `JIRA_EMAIL`, `MCP_SECRET`,
+  `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
+- `.github/workflows/nautilus-{build,deploy,undeploy}.yaml` — Build auf
+  push/PR, Deploy via repository_dispatch (dev → live), Muster
+  growth-cockpit.
 
 ## JIRA authentication — sipgate Atlassian Cloud (sipgatede.atlassian.net)
 
@@ -508,101 +510,6 @@ browser automation tools (Claude in Chrome, preview tools, etc.). The
 Caddy URL triggers certificate warnings, auth redirects, and other issues
 that break automated testing. Always use `http://localhost:3020` directly.
 
-## Cache-Warmer for the slow overview endpoints
-
-`/api/leads/overview?produkt=frontdesk` and `/api/marketing/funnel` need
-**34–50 s** to build on a cold cache (heavy HubSpot fan-out + Amplitude
-BigQuery). Netlify kills a synchronous function at ~26 s, so these two
-endpoints used to 502 permanently: the server-side Blobs cache is only
-written *after* a successful build, the build never finished in time, so the
-cache never warmed and every request re-timed-out. (`/api/deals/overview`
-at ~12 s stayed under the limit — that's why only these two broke.)
-
-**Fix:** the slow builds no longer run on the request path. A background
-function does the build off-band; the routes only ever read the cache. The
-build is triggered **on-demand** — when a user opens a stale/cold view — not
-by a wall-clock cron (see the cost incident below for why).
-
-### Moving parts
-
-- `src/lib/overview/leads.ts` / `marketing-funnel.ts` — the extracted
-  `buildLeadsOverview` / `buildMarketingFunnel` builders (moved out of the
-  route files so a plain Netlify function can import them — route files
-  import `next/server` and are not bundlable there). The routes now keep
-  only their `GET` handler and re-export the lead types.
-- `src/lib/overview/warm-targets.ts` — single source of truth for *what*
-  is warmed (`getWarmTargets()`) and the rebuild-and-write loop
-  (`warmAllTargets()`). Targets: `leads-overview:frontdesk` and
-  `marketing-funnel:frontdesk:{30,90,all}d` (the three Marketing-tab date
-  presets; `all` is recomputed each run via `getDaysForPreset('all')` so its
-  key tracks the value the client sends). Comparison windows (×2) are **not**
-  warmed — they fall back to the cold-start path.
-  - **TTL-gated:** a run only rebuilds a target whose cached entry is missing
-    or older than its TTL; fresh targets are skipped (`skipped: true`). Cost is
-    bounded by the TTL (how stale an entry can get), **not** by how often the
-    warmer is invoked — so on-demand triggers can't stack into a runaway.
-  - **Kill switch:** set `WARMER_DISABLED=true` in the env to make
-    `warmAllTargets()` a no-op without a code change.
-- `src/lib/overview/warm-cache.ts` — `serveWarmBacked()`, the read-side used
-  by the two routes. On Netlify it **never builds synchronously**: serves the
-  cached entry (even if stale, nudging the warmer out-of-band via
-  `triggerWarm()`), or returns `null` on a true cold miss → the route answers
-  `503 { warming: true }`. Off Netlify (`next dev`) it falls back to the old
-  synchronous `getOrFetch`.
-- `netlify/functions/warm-overview-cache-background.mts` — `config.background`
-  (15-min budget). Runs `warmAllTargets()`. The **only** place the slow
-  builds run in production. Invoked on-demand by `triggerWarm()`.
-- `netlify/functions/warm-overview-cache-scheduled.mts` — **cron disabled**
-  (no `config.schedule`, no-op handler). Kept as a no-schedule function so a
-  conservative safety-net cron would be a one-line change — but only ever
-  together with the TTL-gate.
-- Frontend (`src/app/page.tsx`): the leads + marketing queries `retry: 6,
-  retryDelay: 10_000` so a cold-start `503` is bridged (~60 s) until the
-  warmer has populated the cache, instead of surfacing an error.
-
-### Cost guardrails (BigQuery) — the 2026-07 incident
-
-The original design ran the warmer on a `*/4 * * * *` cron that rebuilt **all**
-targets on **every** tick, ignoring the cache TTL — ~40 Amplitude BigQuery
-queries every 4 min = **~1000 $/day** of BigQuery cost (360 runs/day, the
-`marketing:all` window scanning a near-TB events table). Three independent
-guardrails now bound this:
-
-- **On-demand + TTL-gate** (above) — the cron is gone; cost scales with real
-  usage and is capped by the per-target TTL.
-- **Per-query `maximumBytesBilled` cap** — `runBigQueryQuery` in
-  `src/lib/amplitude/client.ts` sets a hard 300 GiB ceiling (override via
-  `BIGQUERY_MAX_BYTES_BILLED`). Any single query that would scan more FAILS
-  loudly (billed 0) instead of running — blast-radius cap for a dropped
-  `WHERE` / lost `event_type` filter / accidental `SELECT *`. Sizing:
-  heaviest legit query is ~74 GiB; runaway full-table scans are 493–816 GiB.
-- **GCP project-level daily bytes quota** (set outside this repo) — the
-  backstop for anything that slips past the code guards.
-
-### Auth / env
-
-The background function is public (`/.netlify/functions/…`), so it is guarded
-by **`TV_SECRET`** (header `x-warm-secret`) — the same secret `/tv` and the
-route bypass already use. No new env var to provision. `triggerWarm()`
-resolves the self base URL from Netlify's built-in `DEPLOY_PRIME_URL` / `URL`.
-
-### Gotchas
-
-- Bundling: the Netlify function imports the builder tree which uses the `@/`
-  path alias. Netlify's esbuild bundler resolves it from the repo
-  `tsconfig.json` (verified). The builder tree must stay free of `next/*`
-  imports or it won't bundle — keep `getSession`/`NextResponse` in the route
-  files, not in `src/lib/overview/`.
-- Cache TTLs: 5 min (leads) / 30 min (funnel). If the warmer never runs,
-  `serveWarmBacked` keeps serving the last cached entry rather than 502ing.
-- The `marketing:all` key is `getDaysForPreset('all')` = days-since-floor,
-  which increments by 1 each day → a **new, cold key every day**. The first
-  viewer per day triggers the on-demand warm and waits ~50 s (503 → retry).
-  A stable `:all` key would remove this; left as a known wrinkle.
-- This is a stopgap on top of the server-side cache. Once BigQuery
-  replication lands (see "Server-side response cache"), the builds get fast
-  enough to run in-band and both the warmer and the cache can go.
-
 ## MCP server — `/api/mcp` (Streamable HTTP)
 
 The cockpit exposes its consolidated numbers to AI agents through an MCP
@@ -613,15 +520,10 @@ to that portfolio.
 
 ### Why in-app, not standalone
 
-The tools do **not** re-derive anything. They self-fetch the existing
-overview endpoints (`/api/deals/overview`, `/api/leads/overview`,
-`/api/projects/overview`, `/api/marketing/funnel`,
-`/api/amplitude/playbook-stats`) over HTTP, so they inherit the same
-HubSpot batching, server-side response cache and rate-limit handling.
-Internal calls authenticate with the existing **`TV_SECRET`** bypass (the
-same one `/tv` uses) — no browser session needed. The self-fetch base URL
-is `MCP_SELF_BASE_URL` → Netlify `URL`/`DEPLOY_PRIME_URL` →
-`http://localhost:3020`.
+The tools do **not** re-derive anything. `src/lib/mcp/data.ts` reads the
+same runtime-store snapshots the API routes serve — byte-identical
+numbers, no HTTP self-fetch, no internal auth. A cold store raises a
+tool error ("Store ist für diese Variante noch kalt").
 
 ### Tools
 

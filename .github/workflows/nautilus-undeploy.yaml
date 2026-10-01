@@ -1,0 +1,19 @@
+name: "nautilus: Undeploy service"
+
+concurrency:
+  group: nautilus-undeploy-${{ github.ref }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository_name:
+        description: "☠️ FINAL WARNING: This undeployment will permanently dismantle the target service. To proceed, type 'dismantle <repository name>' to confirm:"
+        required: true
+        type: string
+
+jobs:
+  undeploy:
+    uses: sipgate/workflows/.github/workflows/nautilus-undeploy.yaml@main
+    with:
+      cluster_prefix: nautilus-tooling01
+      deletion_confirmation: ${{ github.event.inputs.repository_name }}

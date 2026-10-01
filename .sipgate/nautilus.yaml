@@ -1,0 +1,86 @@
+# Nautilus Service CRD für sales-cockpit.
+# Muster: growth-cockpit (.sipgate/nautilus.yaml), dieses wiederum
+# github.com/sipgate/sona-monitor.
+#
+# Runtime-Poller (HubSpot + JIRA + Amplitude BigQuery) füllen den
+# In-Memory-Store; Egress nur zu den vier Quell-APIs. Zugriffschutz ist
+# das VPN — kein next-auth mehr.
+#
+# ⚠️ Die secret-Werte unten sind PLATZHALTER und müssen vor dem ersten
+# Deploy mit `nautilusctl` versiegelt werden (lokal nicht möglich):
+#   nautilusctl … (siehe growth-cockpit/.sipgate/nautilus.yaml als
+#   Referenz für versiegelte Werte). Zu versiegeln:
+#   HUBSPOT_PRIVATE_APP_TOKEN, JIRA_API_TOKEN, JIRA_BASE_URL,
+#   JIRA_EMAIL, MCP_SECRET, GOOGLE_APPLICATION_CREDENTIALS_JSON.
+apiVersion: nautilus.sipgate.cloud/v1beta1
+kind: Service
+metadata:
+  name: sales-cockpit
+spec:
+  backup: "false"
+  config:
+  - egressNetworkPolicies:
+    - port: 443
+      target: api.hubspot.com
+    - port: 443
+      target: sipgatede.atlassian.net
+    - port: 443
+      target: bigquery.googleapis.com
+    - port: 443
+      target: oauth2.googleapis.com
+    secrets:
+    - name: HUBSPOT_PRIVATE_APP_TOKEN
+      value: TODO_SEAL
+    - name: JIRA_API_TOKEN
+      value: TODO_SEAL
+    - name: JIRA_BASE_URL
+      value: TODO_SEAL
+    - name: JIRA_EMAIL
+      value: TODO_SEAL
+    - name: MCP_SECRET
+      value: TODO_SEAL
+    - name: GOOGLE_APPLICATION_CREDENTIALS_JSON
+      value: TODO_SEAL
+    selector:
+      env: dev
+  containerized: "true"
+  image: sipgate/service/nautilus/sales-cockpit
+  livenessProbe:
+    failureThreshold: 60
+    httpGet:
+      path: /health
+      port: http
+      scheme: HTTP
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  localPersistence: "false"
+  onCallSchedule: bestEffort
+  owner: productpeople
+  pciDssRelevant: "false"
+  platform: nautilus
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+  # 1 Replika statt 2: Der Runtime-Poller fragt Quellen auf Timern ab,
+  # doppelte Polls (je Replika ein eigener Store) sind unnötig; so sind
+  # alle Stände identisch. Entschieden 2026-10-01.
+  replicasPerLocation: 1
+  readinessProbe:
+    failureThreshold: 3
+    httpGet:
+      path: /health
+      port: http
+      scheme: HTTP
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  singleton: "false"
+  tlsProvider: external
+  virtualized: "true"
+status:
+  features: {}
+  lastReconcileTime: null

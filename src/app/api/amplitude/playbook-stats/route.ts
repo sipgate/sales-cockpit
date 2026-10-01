@@ -1,38 +1,34 @@
-import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
-import { getPlaybookStats, type PlaybookStats } from '@/lib/amplitude/playbook-stats';
-import { getOrFetch } from '@/lib/server-cache';
+// Playbook-Stats: dünner Store-Reader. Der Build (Amplitude BigQuery)
+// läuft im Hintergrund-Poller (src/lib/runtime/poller.ts →
+// getPlaybookStats), je Day-Window.
 
-const CACHE_TTL_SECONDS = 30 * 60;
+import { NextResponse } from 'next/server';
+import { getSnapshotWithStand, playbookKey } from '@/lib/runtime/store';
+import type { PlaybookStats } from '@/lib/amplitude/playbook-stats';
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const tvSecret = searchParams.get('tvSecret');
-    const isValidTvSecret = tvSecret && process.env.TV_SECRET && tvSecret === process.env.TV_SECRET;
 
-    if (!isValidTvSecret) {
-      const session = await getSession();
-      if (!session) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    }
-
+    // Muss einem gepollten Window entsprechen (UI-Presets 30/90/all,
+    // Vergleichsfenster ×2). Default 90 Tage.
     const daysRaw = Number(searchParams.get('days'));
     const days = Number.isFinite(daysRaw) && daysRaw > 0 && daysRaw <= 365 ? daysRaw : 90;
-    const forceRefresh = searchParams.get('refresh') === '1';
 
-    const { data, meta } = await getOrFetch<PlaybookStats>(
-      `playbook-stats:${days}d`,
-      CACHE_TTL_SECONDS,
-      () => getPlaybookStats(days),
-      { forceRefresh },
-    );
-    return NextResponse.json({ success: true, data, cache: meta });
+    const entry = getSnapshotWithStand<PlaybookStats>(playbookKey(days));
+
+    if (!entry) {
+      return NextResponse.json(
+        { success: false, warming: true, error: 'Store is warming up, retry shortly.' },
+        { status: 503, headers: { 'Retry-After': '10' } }
+      );
+    }
+
+    return NextResponse.json({ success: true, data: entry.snapshot, stand: entry.stand });
   } catch (err) {
     console.error('[playbook-stats]', err);
     return NextResponse.json(
-      { error: 'Failed to fetch playbook stats' },
+      { error: 'Failed to read playbook stats' },
       { status: 500 },
     );
   }

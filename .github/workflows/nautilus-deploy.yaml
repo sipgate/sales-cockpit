@@ -1,0 +1,27 @@
+name: "nautilus: Deploy service"
+
+concurrency:
+  group: nautilus-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  repository_dispatch:
+    types: docker-image-digest-changed
+
+jobs:
+  deploy-dev:
+    uses: sipgate/workflows/.github/workflows/nautilus-deploy-env.yaml@main
+    with:
+      cluster_prefix: nautilus-tooling01
+      image_hash: ${{ github.event.client_payload.image_hash }}
+      environment: dev
+      wait_for_deployment: false
+  deploy-live:
+    needs: [deploy-dev]
+    uses: sipgate/workflows/.github/workflows/nautilus-deploy-env.yaml@main
+    with:
+      cluster_prefix: nautilus-tooling01
+      image_hash: ${{ github.event.client_payload.image_hash }}
+      environment: live
+      locations: "[ 'ix01' ]"
+      wait_for_deployment: false

@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
 import { getHubSpotClient } from '@/lib/hubspot/client';
 import { mapHubSpotToCanvas, mapCanvasToHubSpot } from '@/lib/hubspot/mapper';
 import type { CanvasData } from '@/types/canvas';
@@ -9,14 +8,6 @@ export async function GET(
   { params }: { params: Promise<{ dealId: string }> }
 ) {
   try {
-    const session = await getSession();
-
-    if (!session) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
 
     const { dealId } = await params;
     const client = getHubSpotClient();
@@ -103,14 +94,6 @@ export async function PATCH(
   { params }: { params: Promise<{ dealId: string }> }
 ) {
   try {
-    const session = await getSession();
-
-    if (!session) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
 
     const { dealId } = await params;
     const canvasData: CanvasData = await request.json();

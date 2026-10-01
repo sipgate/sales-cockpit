@@ -4,6 +4,7 @@ import { Suspense, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { DealCarousel } from '@/components/tv/DealCarousel';
+import { SALES_PIPELINE_ID } from '@/lib/constants';
 import { Loader2 } from 'lucide-react';
 import type { PipelineOverviewResponse, DealMeetingsMap } from '@/app/api/deals/overview/route';
 import type { DealStageHistoryMap } from '@/app/api/deals/overview/stage-history/route';
@@ -42,20 +43,16 @@ function TVContent() {
   const searchParams = useSearchParams();
   const pipelineIdFromUrl = searchParams.get('pipelineId');
   const intervalSeconds = parseInt(searchParams.get('interval') || '10', 10);
-  const tvSecret = searchParams.get('tvSecret') || '';
 
   const [selectedPipelineIdFromPicker, setSelectedPipelineIdFromPicker] = useState<string | null>(null);
   const selectedPipelineId = pipelineIdFromUrl || selectedPipelineIdFromPicker;
 
-  // Build auth suffix for API calls
-  const authParam = tvSecret ? `&tvSecret=${encodeURIComponent(tvSecret)}` : '';
-  const authParamFirst = tvSecret ? `?tvSecret=${encodeURIComponent(tvSecret)}` : '';
 
   // Fetch pipelines (for selector when no pipelineId in URL)
   const { data: pipelines, isLoading: pipelinesLoading } = useQuery({
-    queryKey: ['tv-pipelines', tvSecret],
+    queryKey: ['tv-pipelines'],
     queryFn: async () => {
-      const res = await fetch(`/api/pipelines${authParamFirst}`);
+      const res = await fetch('/api/pipelines');
       if (!res.ok) throw new Error('Failed to fetch pipelines');
       const data = await res.json();
       return data.data as Pipeline[];
@@ -65,10 +62,10 @@ function TVContent() {
 
   // Fetch pipeline overview
   const { data: overviewData, isLoading: overviewLoading } = useQuery({
-    queryKey: ['tv-overview', selectedPipelineId, tvSecret],
+    queryKey: ['tv-overview', selectedPipelineId],
     queryFn: async () => {
       const res = await fetch(
-        `/api/deals/overview?pipelineId=${selectedPipelineId}${authParam}`
+        `/api/deals/overview?pipelineId=${selectedPipelineId}`
       );
       if (!res.ok) throw new Error('Failed to fetch overview');
       const data = await res.json();
@@ -84,11 +81,11 @@ function TVContent() {
 
   // Fetch meetings
   const { data: meetingsData } = useQuery({
-    queryKey: ['tv-meetings', selectedPipelineId, dealIds.join(','), tvSecret],
+    queryKey: ['tv-meetings', selectedPipelineId, dealIds.join(',')],
     queryFn: async () => {
       if (dealIds.length === 0) return {} as DealMeetingsMap;
       const res = await fetch(
-        `/api/deals/overview/meetings?dealIds=${dealIds.join(',')}${authParam}`
+        `/api/deals/overview/meetings?dealIds=${dealIds.join(',')}`
       );
       if (!res.ok) throw new Error('Failed to fetch meetings');
       const data = await res.json();
@@ -100,11 +97,11 @@ function TVContent() {
 
   // Fetch stage history
   const { data: stageHistoryData } = useQuery({
-    queryKey: ['tv-stage-history', selectedPipelineId, dealIds.join(','), tvSecret],
+    queryKey: ['tv-stage-history', selectedPipelineId, dealIds.join(',')],
     queryFn: async () => {
       if (dealIds.length === 0) return {} as DealStageHistoryMap;
       const res = await fetch(
-        `/api/deals/overview/stage-history?dealIds=${dealIds.join(',')}${authParam}`
+        `/api/deals/overview/stage-history?dealIds=${dealIds.join(',')}`
       );
       if (!res.ok) throw new Error('Failed to fetch stage history');
       const data = await res.json();
@@ -145,7 +142,12 @@ function TVContent() {
           <Loader2 className="h-8 w-8 animate-spin" style={{ color: 'var(--gray-dark-11)' }} />
         ) : (
           <div className="flex flex-col gap-3 min-w-[300px]">
-            {pipelines?.map((pipeline) => (
+            {/* Nur die Sales-Pipeline: Der Runtime-Poller baut die Overview
+                ausschließlich für sie (je Portfolio-Wert), alle anderen
+                Pipelines hätten im Store keinen Snapshot (404). */}
+            {pipelines
+              ?.filter((pipeline) => pipeline.id === SALES_PIPELINE_ID)
+              .map((pipeline) => (
               <button
                 key={pipeline.id}
                 onClick={() => setSelectedPipelineIdFromPicker(pipeline.id)}

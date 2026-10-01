@@ -1,10 +1,8 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState, useMemo, useRef } from 'react';
-import { useSession } from 'next-auth/react';
+import { Suspense, useCallback, useEffect, useState, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
-import { UserMenu } from '@/components/UserMenu';
 import { DealStageGroup } from '@/components/pipeline/DealStageGroup';
 import { DealListView } from '@/components/pipeline/DealListView';
 import { DashboardView } from '@/components/pipeline/DashboardView';
@@ -61,7 +59,7 @@ import {
   getDaysForPreset as getMarketingDaysForPreset,
   canShowComparison,
 } from '@/lib/marketing/date-presets';
-import { getCachedData, setCachedData, clearPipelineCache } from '@/lib/pipeline-cache';
+import { PORTFOLIO_OPTIONS, SALES_PIPELINE_ID, type PortfolioValue } from '@/lib/constants';
 
 // localStorage-Prefixe für die pro-Tab gespeicherten Filter-Sets und die
 // aktiv geschalteten Badges. Pipeline/Produkt fließen mit ein, damit jeder
@@ -84,19 +82,6 @@ const LEAD_SYSTEM_BADGE_OPEN = 'system:leads-open';
 const LEAD_SYSTEM_BADGE_MIN_1000 = 'system:leads-min-1000';
 const LEAD_SYSTEM_BADGE_MIN_2000 = 'system:leads-min-2000';
 const LEAD_SYSTEM_BADGE_NO_DEAL = 'system:leads-no-deal';
-
-const SALES_PIPELINE_ID = '3576006860';
-
-const PORTFOLIO_OPTIONS = [
-  { value: 'neo', label: 'Cloud PBX' },
-  { value: 'frontdesk', label: 'AI Agents' },
-  { value: 'flow', label: 'AI Flow' },
-  { value: 'cx', label: 'Contact Center' },
-  { value: 'trunking', label: 'Trunking' },
-  { value: 'easy', label: 'satellite Business' },
-] as const;
-
-type PortfolioValue = typeof PORTFOLIO_OPTIONS[number]['value'];
 
 function isPortfolioValue(value: string | null): value is PortfolioValue {
   return PORTFOLIO_OPTIONS.some(option => option.value === value);
@@ -128,14 +113,12 @@ function PipelineOverviewContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
-  const { status } = useSession();
   const selectedPipelineId = SALES_PIPELINE_ID;
   const [sortByStage, setSortByStage] = useState<Record<string, { field: SortField; direction: SortDirection }>>({});
-  // Hydration-Guard: clientseitig wird `getCachedData` (localStorage) synchron
-  // im useMemo gelesen → der initiale Client-Render sieht ggf. fertige Daten,
-  // während der SSR-Render `undefined` hat. Damit der erste Client-Render
-  // identisch zum Server-HTML bleibt, gaten wir loading-abhängige UI hinter
-  // `hydrated`. Erst nach dem ersten Effect dürfen wir abweichen.
+  // Hydration-Guard: Der SSR-Render kennt keine Query-Ergebnisse, der
+  // initiale Client-Render erst nach dem ersten Effect. Damit der erste
+  // Client-Render identisch zum Server-HTML bleibt, gaten wir
+  // loading-abhängige UI hinter `hydrated`.
   const [hydrated, setHydrated] = useState(false);
   // Klassisches "mounted"-Pattern: `setHydrated(true)` direkt im Effect ist
   // hier gewollt (genau einmal nach Mount), nicht der von der ESLint-Regel
@@ -157,7 +140,6 @@ function PipelineOverviewContent() {
   const [leadsFilter, setLeadsFilter] = useState<FilterState<LeadFieldType>>(() => getDefaultFilterState<LeadFieldType>());
   const [leadsSavedSets, setLeadsSavedSets] = useState<SavedFilterSet<LeadFieldType>[]>([]);
 
-  const isAuthenticated = status === 'authenticated';
   const selectedProdukt = useMemo(() => {
     const produktFromUrl = searchParams.get('produkt');
     return isPortfolioValue(produktFromUrl) ? produktFromUrl : PORTFOLIO_OPTIONS[0].value;
@@ -208,101 +190,56 @@ function PipelineOverviewContent() {
       ? 'dashboard'
       : viewMode;
 
-  // Cache key includes product for separate caching per product group
-  const cacheKey = selectedPipelineId && selectedProdukt ? `${selectedPipelineId}-${selectedProdukt}` : null;
-
-  // Cache aus localStorage als `initialData`-Funktion lesen — lazy, läuft nur
-  // beim ersten Mount der jeweiligen Query und nur clientseitig (`getCachedData`
-  // bricht serverseitig sofort ab, weil `window === undefined`). Damit ist die
-  // Query beim Reload sofort im success-State, ohne erst einen Fetch zu
-  // starten und beim Mount-Effect den Cache nachzuziehen — letzteres war zuvor
-  // wirkungslos, weil React Query `initialData` nur beim allerersten Render
-  // ausliest. Loading-abhängige UI bleibt weiter hinter `hydrated` gegated.
-
-  // Beim Klick auf "Refresh" soll der server-seitige Blob-Cache (siehe
-  // src/lib/server-cache.ts) für genau diesen einen Fetch umgangen werden,
-  // damit der User frische HubSpot-Daten bekommt — ohne dass background-
-  // refetches (Tab-Focus, Reconnect) jedesmal HubSpot treffen.
-  // Pattern: handleRefresh flaggt alle fünf Endpoints; jede queryFn liest
-  // den Flag und resettet ihn nach dem Fetch.
-  const pendingServerRefresh = useRef<Record<string, boolean>>({});
-  const takeRefreshFlag = (key: string): string => {
-    if (pendingServerRefresh.current[key]) {
-      pendingServerRefresh.current[key] = false;
-      return '&refresh=1';
-    }
-    return '';
-  };
-
   // Fetch pipeline overview filtered by product (server-side)
   const { data: overviewData, isLoading: overviewLoading, error: overviewError } = useQuery({
     queryKey: ['pipeline-overview', selectedPipelineId, selectedProdukt],
     queryFn: async () => {
-      const response = await fetch(`/api/deals/overview?pipelineId=${selectedPipelineId}&produkt=${selectedProdukt}${takeRefreshFlag('overview')}`);
+      const response = await fetch(`/api/deals/overview?pipelineId=${selectedPipelineId}&produkt=${selectedProdukt}`);
       if (!response.ok) throw new Error('Failed to fetch pipeline overview');
       const data = await response.json();
       const result = data.data as PipelineOverviewResponse;
-      if (cacheKey) setCachedData(`overview-${cacheKey}`, result);
       return result;
     },
-    enabled: isAuthenticated && !!selectedPipelineId && !!selectedProdukt,
-    staleTime: 5 * 60 * 1000,
-    initialData: () =>
-      cacheKey ? getCachedData<PipelineOverviewResponse>(`overview-${cacheKey}`) ?? undefined : undefined,
+    enabled: !!selectedPipelineId && !!selectedProdukt,
+    staleTime: 5 * 60 * 1000
   });
   const overviewDeals = overviewData?.deals;
   const overviewStages = overviewData?.stages;
 
   // Fetch leads for the selected portfolio (separate CRM object, own pipeline).
-  // Cache-Key nur nach Produkt, weil der Leads-Endpoint keine Pipeline-Auswahl
-  // kennt (fix auf LEAD_PIPELINE_ID im Route-Handler).
-  const leadsCacheKey = selectedProdukt ? `leads-overview-${selectedProdukt}` : null;
-
   const { data: leadsData, isLoading: leadsLoading } = useQuery({
     queryKey: ['pipeline-leads', selectedProdukt],
     queryFn: async () => {
-      const response = await fetch(`/api/leads/overview?produkt=${selectedProdukt}${takeRefreshFlag('leads')}`);
+      const response = await fetch(`/api/leads/overview?produkt=${selectedProdukt}`);
       if (!response.ok) throw new Error('Failed to fetch leads overview');
       const data = await response.json();
       const result = data.data as LeadsOverviewResponse;
-      if (leadsCacheKey) setCachedData(leadsCacheKey, result);
       return result;
     },
-    enabled: isAuthenticated && !!selectedProdukt,
+    enabled: !!selectedProdukt,
     staleTime: 5 * 60 * 1000,
-    // Cold-Start: der Server antwortet 503 "warming" solange der Background-
-    // Warmer den Cache noch nicht gefüllt hat. Lang genug retryen (12×10s ≈ 2min),
-    // um den sequentiellen Warmer-Lauf (~110s für alle Targets) zu überdauern,
-    // statt sofort einen Fehler zu zeigen. Panels zeigen derweil localStorage-Daten.
+    // Cold-Start: der Server antwortet 503 "warming" solange der Boot-Poll
+    // den Store noch nicht gefüllt hat. Lang genug retryen (12×10s ≈ 2min),
+    // statt sofort einen Fehler zu zeigen.
     retry: 12,
-    retryDelay: 10_000,
-    initialData: () =>
-      leadsCacheKey ? getCachedData<LeadsOverviewResponse>(leadsCacheKey) ?? undefined : undefined,
+    retryDelay: 10_000
   });
 
   // Projects (Wochenansicht) — bisher nur für AI Agents implementiert. Andere
   // Produkte haben weder das `jira_story`-Property noch ein "Ende der
   // Testphase"-Feld am passenden JIRA-Issue, daher beschränken wir den Tab
   // serverseitig (400) und clientseitig (Tab versteckt) auf produkt=frontdesk.
-  // Cache-Key versioniert (-v2): das Response-Schema wurde um dealStage /
-  // dealIsLost / projectIsClosed erweitert. Alte localStorage-Einträge ohne
-  // diese Felder hätten sonst die neuen Filter-Badges falsch zählen lassen
-  // (alle als "offen", weil undefined → falsy).
-  const projectsCacheKey = selectedProdukt === 'frontdesk' ? `projects-overview-frontdesk-v5` : null;
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     queryKey: ['projects-overview', selectedProdukt],
     queryFn: async () => {
-      const response = await fetch(`/api/projects/overview?produkt=${selectedProdukt}${takeRefreshFlag('projects')}`);
+      const response = await fetch(`/api/projects/overview?produkt=${selectedProdukt}`);
       if (!response.ok) throw new Error('Failed to fetch projects overview');
       const data = await response.json();
       const result = data.data as ProjectsOverviewResponse;
-      if (projectsCacheKey) setCachedData(projectsCacheKey, result);
       return result;
     },
-    enabled: isAuthenticated && selectedProdukt === 'frontdesk',
-    staleTime: 5 * 60 * 1000,
-    initialData: () =>
-      projectsCacheKey ? getCachedData<ProjectsOverviewResponse>(projectsCacheKey) ?? undefined : undefined,
+    enabled: selectedProdukt === 'frontdesk',
+    staleTime: 5 * 60 * 1000
   });
 
   // Date-Preset für die Marketing-Tab (Sankey/Funnel/Tabelle). State liegt
@@ -313,41 +250,33 @@ function PipelineOverviewContent() {
   const marketingDays = getMarketingDaysForPreset(marketingDatePresetKey);
   // Marketing-Funnel: AI-Agents-only, lazy — wir lassen die Query nur laufen
   // wenn der Marketing-Tab aktiv ist UND das Produkt frontdesk ist. Spart den
-  // teuren BQ-Roundtrip auf jedem Pageload.
-  const marketingCacheKey =
-    selectedProdukt === 'frontdesk'
-      ? `marketing-funnel-frontdesk-v30-${marketingDays}d`
-      : null;
+  // (vom Poller ohnehin im Hintergrund gebauten) Funnel-Abruf beim Mount.
   const { data: marketingData, isLoading: marketingLoading, isFetching: marketingFetching } = useQuery({
     queryKey: ['marketing-funnel', selectedProdukt, marketingDays],
     queryFn: async () => {
       const response = await fetch(
-        `/api/marketing/funnel?produkt=${selectedProdukt}&days=${marketingDays}${takeRefreshFlag('marketing')}`,
+        `/api/marketing/funnel?produkt=${selectedProdukt}&days=${marketingDays}`,
       );
       if (!response.ok) throw new Error('Failed to fetch marketing funnel');
       const data = await response.json();
       const result = data.data as MarketingFunnelResponse;
-      if (marketingCacheKey) setCachedData(marketingCacheKey, result);
       return result;
     },
     // Dashboard nutzt die Journey-Daten zur Gruppierung des Prospects-Charts
     // nach erstem Marketing-Touchpoint — daher auch im Dashboard-Tab laden.
     // KPI-Tree braucht bqTotals + Journeys für Signup-/Trial-/Lead-Metriken.
     enabled:
-      isAuthenticated &&
       selectedProdukt === 'frontdesk' &&
       (effectiveViewMode === 'marketing' || effectiveViewMode === 'dashboard' || effectiveViewMode === 'kpi-tree'),
     staleTime: 30 * 60 * 1000,
-    // Cold-Start: 503 "warming" überbrücken bis der Background-Warmer den
-    // Funnel-Cache gefüllt hat (Build ~50s). Siehe Leads-Query oben.
+    // Cold-Start: 503 "warming" überbrücken bis der Boot-Poll das
+    // Funnel-Window gefüllt hat. Siehe Leads-Query oben.
     retry: 12,
     retryDelay: 10_000,
     // Beim Date-Preset-Wechsel die vorherigen Daten im UI lassen statt
     // Loading-Spinner zu zeigen. Marketing-Touch zeigt kurz die alten Zahlen,
     // dann liest sich das Diagramm sauber zur neuen Auflösung um.
-    placeholderData: keepPreviousData,
-    initialData: () =>
-      marketingCacheKey ? getCachedData<MarketingFunnelResponse>(marketingCacheKey) ?? undefined : undefined,
+    placeholderData: keepPreviousData
   });
 
   // Background-Prefetch der anderen Date-Preset-Windows, damit ein
@@ -380,12 +309,12 @@ function PipelineOverviewContent() {
   const { data: playbookStats } = useQuery({
     queryKey: ['playbook-stats', marketingDays],
     queryFn: async () => {
-      const response = await fetch(`/api/amplitude/playbook-stats?days=${marketingDays}${takeRefreshFlag('playbookStats')}`);
+      const response = await fetch(`/api/amplitude/playbook-stats?days=${marketingDays}`);
       if (!response.ok) throw new Error('Failed to fetch playbook stats');
       const json = await response.json();
       return json.data as PlaybookStats;
     },
-    enabled: isAuthenticated && effectiveViewMode === 'kpi-tree',
+    enabled: effectiveViewMode === 'kpi-tree',
     staleTime: 30 * 60 * 1000,
   });
 
@@ -404,7 +333,7 @@ function PipelineOverviewContent() {
       const data = await response.json();
       return data.data as MarketingFunnelResponse;
     },
-    enabled: isAuthenticated && selectedProdukt === 'frontdesk' && effectiveViewMode === 'kpi-tree' && showKpiComparison,
+    enabled: selectedProdukt === 'frontdesk' && effectiveViewMode === 'kpi-tree' && showKpiComparison,
     staleTime: 30 * 60 * 1000,
   });
 
@@ -416,7 +345,7 @@ function PipelineOverviewContent() {
       const json = await response.json();
       return json.data as PlaybookStats;
     },
-    enabled: isAuthenticated && effectiveViewMode === 'kpi-tree' && showKpiComparison,
+    enabled: effectiveViewMode === 'kpi-tree' && showKpiComparison,
     staleTime: 30 * 60 * 1000,
   });
 
@@ -427,7 +356,6 @@ function PipelineOverviewContent() {
   async function fetchInBatches<T extends Record<string, unknown>>(
     endpoint: string,
     ids: string[],
-    refreshSuffix: string,
     batchSize = 100,
   ): Promise<T> {
     const batches: string[][] = [];
@@ -436,7 +364,7 @@ function PipelineOverviewContent() {
     }
     const results = await Promise.all(
       batches.map(async (batch) => {
-        const response = await fetch(`${endpoint}?dealIds=${batch.join(',')}${refreshSuffix}`);
+        const response = await fetch(`${endpoint}?dealIds=${batch.join(',')}`);
         if (!response.ok) throw new Error(`Failed to fetch ${endpoint}`);
         const data = await response.json();
         return data.data as T;
@@ -445,44 +373,28 @@ function PipelineOverviewContent() {
     return Object.assign({}, ...results) as T;
   }
 
-  // Get cached meetings data
-  const cachedMeetings = useMemo(
-    () => cacheKey ? getCachedData<DealMeetingsMap>(`meetings-${cacheKey}`) : null,
-    [cacheKey]
-  );
-
   // Fetch meetings separately
   const { data: meetingsData, isLoading: meetingsLoading, isFetching: meetingsFetching } = useQuery({
     queryKey: ['pipeline-meetings', selectedPipelineId, selectedProdukt, dealIds.join(',')],
     queryFn: async () => {
       if (dealIds.length === 0) return {} as DealMeetingsMap;
-      const result = await fetchInBatches<DealMeetingsMap>('/api/deals/overview/meetings', dealIds, takeRefreshFlag('meetings'));
-      if (cacheKey) setCachedData(`meetings-${cacheKey}`, result);
+      const result = await fetchInBatches<DealMeetingsMap>('/api/deals/overview/meetings', dealIds);
       return result;
     },
-    enabled: isAuthenticated && dealIds.length > 0,
-    staleTime: 5 * 60 * 1000,
-    initialData: cachedMeetings ?? undefined,
+    enabled: dealIds.length > 0,
+    staleTime: 5 * 60 * 1000
   });
-
-  // Get cached stage history data
-  const cachedStageHistory = useMemo(
-    () => cacheKey ? getCachedData<DealStageHistoryMap>(`stage-history-${cacheKey}`) : null,
-    [cacheKey]
-  );
 
   // Fetch stage history separately
   const { data: stageHistoryData, isLoading: stageHistoryLoading, isFetching: stageHistoryFetching } = useQuery({
     queryKey: ['pipeline-stage-history', selectedPipelineId, selectedProdukt, dealIds.join(',')],
     queryFn: async () => {
       if (dealIds.length === 0) return {} as DealStageHistoryMap;
-      const result = await fetchInBatches<DealStageHistoryMap>('/api/deals/overview/stage-history', dealIds, takeRefreshFlag('stageHistory'));
-      if (cacheKey) setCachedData(`stage-history-${cacheKey}`, result);
+      const result = await fetchInBatches<DealStageHistoryMap>('/api/deals/overview/stage-history', dealIds);
       return result;
     },
-    enabled: isAuthenticated && dealIds.length > 0,
-    staleTime: 5 * 60 * 1000,
-    initialData: cachedStageHistory ?? undefined,
+    enabled: dealIds.length > 0,
+    staleTime: 5 * 60 * 1000
   });
 
   // Merge meetings and stage history into deals
@@ -516,22 +428,9 @@ function PipelineOverviewContent() {
     [marketingData],
   );
 
-  // Refresh all data
+  // Refresh all data: Queries invalidieren und damit aus dem Runtime-Store
+  // neu lesen. Datenqualität = letzter Poller-Lauf, nicht Klick-Zeitpunkt.
   const handleRefresh = () => {
-    if (cacheKey) {
-      clearPipelineCache(cacheKey, selectedProdukt ?? undefined);
-    }
-    // Server-Cache (Netlify Blobs / lokales FS) für genau diesen Klick
-    // bypassen. Background-Refetches (Tab-Focus, Reconnect) bleiben unberührt.
-    pendingServerRefresh.current = {
-      overview: true,
-      leads: true,
-      projects: true,
-      marketing: true,
-      meetings: true,
-      stageHistory: true,
-      playbookStats: true,
-    };
     queryClient.invalidateQueries({ queryKey: ['pipeline-overview', selectedPipelineId, selectedProdukt] });
     queryClient.invalidateQueries({ queryKey: ['pipeline-meetings', selectedPipelineId, selectedProdukt] });
     queryClient.invalidateQueries({ queryKey: ['pipeline-stage-history', selectedPipelineId, selectedProdukt] });
@@ -550,13 +449,6 @@ function PipelineOverviewContent() {
   // Show the MRR ≥ 450 € System-Badge standardmäßig nur für AI Agents, weil
   // dort diese Heuristik sinnvoll ist (andere Portfolios haben andere Preise).
   const showAgentMrrBadge = selectedProdukt === 'frontdesk';
-
-  // Redirect to login if not authenticated
-  useEffect(() => {
-    if (status === 'unauthenticated') {
-      router.push('/login');
-    }
-  }, [status, router]);
 
   const handleSortChange = (stageId: string, field: SortField) => {
     setSortByStage(prev => {
@@ -581,9 +473,6 @@ function PipelineOverviewContent() {
         };
       }
 
-      if (cacheKey) {
-        setCachedData(`sort-${cacheKey}`, newSort);
-      }
 
       return newSort;
     });
@@ -1086,18 +975,6 @@ function PipelineOverviewContent() {
     });
   };
 
-  if (status === 'loading') {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-      </div>
-    );
-  }
-
-  if (status === 'unauthenticated') {
-    return null;
-  }
-
   const currentLabel = PORTFOLIO_OPTIONS.find(o => o.value === selectedProdukt)?.label || '';
 
   return (
@@ -1129,7 +1006,6 @@ function PipelineOverviewContent() {
               </div>
             )}
           </div>
-          <UserMenu />
         </div>
       </header>
 
@@ -1144,9 +1020,9 @@ function PipelineOverviewContent() {
             </div>
           </div>
         ) : !hydrated || overviewLoading || leadsLoading ? (
-          // `!hydrated` mit reinnehmen, damit Server-Render (kein localStorage)
-          // und Initial-Client-Render (mit Cache via `initialData`) dasselbe
-          // HTML produzieren — sonst gibt's einen Hydration-Mismatch.
+          // `!hydrated` mit reinnehmen, damit Server-Render und Initial-
+          // Client-Render dasselbe HTML produzieren — sonst gibt's einen
+          // Hydration-Mismatch.
           // Außerdem auf `leadsLoading` warten, damit das Dashboard nicht
           // erst mit fehlender Source-Aufteilung ("Prospects/Woche" cascade,
           // "Leads/Woche" leer) erscheint und sich Sekunden später nachfüllt.

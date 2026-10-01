@@ -1,20 +1,41 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Sales Cockpit
 
-## Getting Started
+Verkaufs-Cockpit für sipgate: Pipeline-Übersicht (HubSpot), Leads, Projekte
+(HubSpot + JIRA), Marketing-Funnel und KPI-Tree (Amplitude via BigQuery) —
+als **Nautilus-Service** im sipgate-Tooling-Cluster.
 
-First, run the development server:
+## Architektur
+
+- **Runtime-Store + Hintergrund-Poller** (Muster: growth-cockpit): Ein
+  Poller holt alle Messdaten auf Timern von HubSpot/JIRA/BigQuery in einen
+  In-Memory-Store (JSON-Persistenz im tmpdir). Die API-Routen sind dünne
+  Store-Reader — kein Quellen-Fetch auf dem Request-Pfad. Details:
+  `AGENTS.md` → „Runtime-Store & Hintergrund-Poller".
+- **Kein Login**: der Service steht hinter dem sipgate-VPN.
+- **Live-Ausnahmen**: `/api/deals/[dealId]` (Canvas, inkl. PATCH) und
+  `/api/jira/*` lesen direkt von den Quellen.
+- **MCP-Server** unter `/api/mcp` (Streamable HTTP, Bearer `MCP_SECRET`)
+  liest dieselben Store-Snapshots.
+
+## Local dev
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3020](http://localhost:3020) with your browser to see the result.
+Open [http://localhost:3020](http://localhost:3020) — nicht die
+Caddy-HTTPS-URL (`https://cockpit.localhost`), die sorgt für
+Zertifikats-Warnungen und Redirects in Test-Tools.
+
+Credentials in `.env.local` (Vorlage: `.env.example`):
+`HUBSPOT_PRIVATE_APP_TOKEN`, `JIRA_*`,
+`GOOGLE_APPLICATION_CREDENTIALS_JSON` (oder `-PATH`), `MCP_SECRET`.
+Ohne Credentials startet der Server, aber die entsprechenden Polls
+bleiben aus (Routen antworten 503, bis der Store gefüllt ist; siehe
+`GET /health` für den Poll-Status).
+
+Der erste Start nach einem Cold Store braucht einige Minuten, bis der
+Boot-Poll alle Domänen gefüllt hat (Leads und Funnel sind die schwersten).
 
 ## Ports
 
@@ -24,36 +45,15 @@ Belegt im 3020er-Block (siehe [`~/Development/PORTS.md`](../PORTS.md)).
 | ---- | ---------------------------------- |
 | 3020 | Next.js dev server (Sales Cockpit) |
 
-URLs:
+## Deploy (Nautilus)
 
-- `https://cockpit.localhost` — primärer Zugang über Caddy (HTTPS, von PM2 verwaltet)
-- `http://localhost:3020` — direkt auf Next.js
+- `Dockerfile` — Standalone-Next-Build, Port 8080, non-root.
+- `.github/workflows/nautilus-build.yaml` baut bei push/PR das Image
+  (BuildKit-Secret `npm_token` für `@sipgate/revop-ui` aus
+  `npm.pkg.github.com`) und triggert nach `main`-Merges den Deploy.
+- `.sipgate/nautilus.yaml` — Service-CRD mit Egress-Policies und
+  versiegelten Secrets. **Secrets vor dem ersten Deploy mit `nautilusctl`
+  versiegeln** (Platzhalter `TODO_SEAL` im YAML).
 
-### Lokal-Auth deaktiviert
-
-Google OAuth akzeptiert keine `*.localhost`-Redirect-URIs (verlangt Public TLD). Statt eines Workarounds ist Auth in Lokal-Dev komplett aus: `NEXT_PUBLIC_AUTH_DISABLED=true` in `.env.local` injected eine Fake-Session, die Middleware skipped die Auth-Gate, API-Routes laufen ohne Session-Check.
-
-- `middleware.ts` — bypass via Flag
-- `src/lib/auth/session.ts` — `getSession()` Wrapper, Fake-Session im Bypass-Mode
-- `src/components/Providers.tsx` — `SessionProvider` mit Fake-Session
-
-**Production (Netlify)** hat `NEXT_PUBLIC_AUTH_DISABLED` nicht gesetzt → echter Google-OAuth-Flow mit Redirect-URI `https://sales-cockpit.netlify.app/api/auth/callback/google`.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Alles Weitere (HubSpot-Token, JIRA-Token, Batch-Regeln, Kosten-Leitplanken
+für BigQuery) steht im [`AGENTS.md`](AGENTS.md).
