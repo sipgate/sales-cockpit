@@ -384,11 +384,13 @@ die Frequenz nur aus den Poll-Timern. Siehe "Cost guardrails" in
 - `.sipgate/nautilus.yaml` — CRD: Egress zu `api.hubspot.com`,
   `sipgatede.atlassian.net`, `bigquery.googleapis.com`,
   `oauth2.googleapis.com`; `replicasPerLocation: 1` (Poller-Store, doppelte
-  Replikas würden doppelt pollen). **Secrets müssen vor dem ersten Deploy
-  mit `nautilusctl` versiegelt werden** (Platzhalter `TODO_SEAL` im YAML);
-  zu versiegeln: `HUBSPOT_PRIVATE_APP_TOKEN`, `JIRA_API_TOKEN`,
-  `JIRA_BASE_URL`, `JIRA_EMAIL`, `MCP_SECRET`,
-  `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
+  Replikas würden doppelt pollen). **Secrets nur auf dev versiegelt**
+  (wie growth-cockpit: Live läuft ohne Secrets, der Poller bleibt aus,
+  Views zeigen den Leerstand). Rotation/Neusetzen eines Secrets:
+  `nautilusctl set secret <KEY> -c nautilus-tooling01 -e dev -f <datei>` —
+  Wert in eine Datei mit `chmod 600`, nie im Chat. Versiegelt:
+  `HUBSPOT_PRIVATE_APP_TOKEN`, `JIRA_API_TOKEN`, `JIRA_BASE_URL`,
+  `JIRA_EMAIL`, `MCP_SECRET`, `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
 - `.github/workflows/nautilus-{build,deploy,undeploy}.yaml` — Build auf
   push/PR, Deploy via repository_dispatch (dev → live), Muster
   growth-cockpit.

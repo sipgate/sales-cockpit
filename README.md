@@ -52,8 +52,8 @@ Belegt im 3020er-Block (siehe [`~/Development/PORTS.md`](../PORTS.md)).
   (BuildKit-Secret `npm_token` für `@sipgate/revop-ui` aus
   `npm.pkg.github.com`) und triggert nach `main`-Merges den Deploy.
 - `.sipgate/nautilus.yaml` — Service-CRD mit Egress-Policies und
-  versiegelten Secrets. **Secrets vor dem ersten Deploy mit `nautilusctl`
-  versiegeln** (Platzhalter `TODO_SEAL` im YAML).
+  versiegelten Secrets (nur dev, siehe `AGENTS.md`; Rotation per
+  `nautilusctl set secret <KEY> -c nautilus-tooling01 -e dev -f <datei>`).
 
 Alles Weitere (HubSpot-Token, JIRA-Token, Batch-Regeln, Kosten-Leitplanken
 für BigQuery) steht im [`AGENTS.md`](AGENTS.md).
